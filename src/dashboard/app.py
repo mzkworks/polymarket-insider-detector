@@ -460,26 +460,119 @@ elif page == "Clusters":
 elif page == "Markets":
     st.title("Market Explorer")
 
-    # Search
-    search = st.text_input("Search markets", placeholder="e.g. Trump, Bitcoin, CPI...")
+    # Filters and controls
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        search = st.text_input("Search markets", placeholder="e.g. Trump, Bitcoin, CPI...")
+    with col2:
+        only_with_trades = st.checkbox("Only markets with trade data", value=True)
 
-    # Note: trade_count subquery removed due to trades table corruption
-    if search:
-        markets = query_df(
-            """SELECT id, question, outcome, category
-               FROM markets
-               WHERE question LIKE ?
-               AND outcome IS NOT NULL
-               LIMIT 50""",
-            (f"%{search}%",),
-        )
+    # Pagination controls
+    col_a, col_b, col_c = st.columns([2, 2, 1])
+    with col_a:
+        per_page = st.selectbox("Markets per page", [25, 50, 100, 200], index=1, key="markets_per_page")
+
+    # Build query based on filters
+    if only_with_trades:
+        # Only show markets that have trade data
+        if search:
+            count_query = """
+                SELECT COUNT(DISTINCT m.id) as count
+                FROM markets m
+                INNER JOIN trades t ON m.id = t.market_id
+                WHERE m.question LIKE ? AND m.outcome IS NOT NULL
+            """
+            count_params = (f"%{search}%",)
+        else:
+            count_query = """
+                SELECT COUNT(DISTINCT m.id) as count
+                FROM markets m
+                INNER JOIN trades t ON m.id = t.market_id
+                WHERE m.outcome IS NOT NULL
+            """
+            count_params = ()
     else:
-        markets = query_df(
-            """SELECT id, question, outcome, category
-               FROM markets
-               WHERE outcome IS NOT NULL
-               LIMIT 50"""
+        # Show all markets
+        if search:
+            count_query = """
+                SELECT COUNT(*) as count
+                FROM markets
+                WHERE question LIKE ? AND outcome IS NOT NULL
+            """
+            count_params = (f"%{search}%",)
+        else:
+            count_query = """
+                SELECT COUNT(*) as count
+                FROM markets
+                WHERE outcome IS NOT NULL
+            """
+            count_params = ()
+
+    # Get total count for pagination
+    total_count = query_df(count_query, count_params)["count"][0]
+
+    with col_b:
+        total_pages = max(1, (total_count + per_page - 1) // per_page)
+        page_num = st.number_input(
+            f"Page (1-{total_pages})",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key="markets_page_num"
         )
+    with col_c:
+        st.metric("Total", f"{total_count:,}")
+
+    offset = (page_num - 1) * per_page
+
+    # Fetch markets based on filters
+    if only_with_trades:
+        if search:
+            markets = query_df(
+                """SELECT DISTINCT m.id, m.question, m.outcome, m.category
+                   FROM markets m
+                   INNER JOIN trades t ON m.id = t.market_id
+                   WHERE m.question LIKE ? AND m.outcome IS NOT NULL
+                   ORDER BY m.question
+                   LIMIT ? OFFSET ?""",
+                (f"%{search}%", per_page, offset),
+            )
+        else:
+            markets = query_df(
+                """SELECT DISTINCT m.id, m.question, m.outcome, m.category
+                   FROM markets m
+                   INNER JOIN trades t ON m.id = t.market_id
+                   WHERE m.outcome IS NOT NULL
+                   ORDER BY m.question
+                   LIMIT ? OFFSET ?""",
+                (per_page, offset),
+            )
+    else:
+        if search:
+            markets = query_df(
+                """SELECT id, question, outcome, category
+                   FROM markets
+                   WHERE question LIKE ? AND outcome IS NOT NULL
+                   ORDER BY question
+                   LIMIT ? OFFSET ?""",
+                (f"%{search}%", per_page, offset),
+            )
+        else:
+            markets = query_df(
+                """SELECT id, question, outcome, category
+                   FROM markets
+                   WHERE outcome IS NOT NULL
+                   ORDER BY question
+                   LIMIT ? OFFSET ?""",
+                (per_page, offset),
+            )
+
+    # Show current range
+    if total_count > 0:
+        start_idx = offset + 1
+        end_idx = min(offset + per_page, total_count)
+        st.caption(f"Showing markets {start_idx:,} - {end_idx:,} of {total_count:,}")
 
     if not markets.empty:
         st.dataframe(
