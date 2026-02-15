@@ -1,0 +1,18 @@
+# Core dependencies
+httpx>=0.24.0
+python-dotenv>=1.0.0
+dnspython>=2.4.0
+
+# Data analysis
+networkx>=3.1
+scipy>=1.11.0
+
+# CLI output
+rich>=13.5.0
+
+# Dashboard
+streamlit>=1.28.0
+plotly>=5.17.0
+
+# Optional: faster alternative to sqlite
+# duckdb>=0.9.0
