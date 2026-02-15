@@ -14,10 +14,16 @@ logger = logging.getLogger(__name__)
 # Two wallets trading the same market within this window are "temporally correlated"
 TEMPORAL_WINDOW_SECONDS = 300  # 5 minutes
 # Minimum edge weight (number of co-trades) to keep an edge in the graph
-# Increased from 3 to 10 to focus on strong coordination signals (dense graphs)
-MIN_EDGE_WEIGHT = 10
+# Increased to 50 to require VERY strong coordination signals
+MIN_EDGE_WEIGHT = 50
 # Minimum cluster size to report
-MIN_CLUSTER_SIZE = 2
+MIN_CLUSTER_SIZE = 3
+# Minimum number of connections a wallet must have to be considered for clustering
+# Increased to 15 to only cluster wallets with exceptional coordination
+MIN_DEGREE = 15
+# Minimum confidence score (0-100) for a cluster to be saved
+# Lowered to 35% to capture high-quality clusters while filtering weak ones
+MIN_CLUSTER_CONFIDENCE = 35.0
 
 
 class ClusterDetector:
@@ -95,6 +101,19 @@ class ClusterDetector:
         isolates = list(nx.isolates(self.graph))
         self.graph.remove_nodes_from(isolates)
 
+        # Remove nodes with degree < MIN_DEGREE (weakly connected wallets)
+        # These wallets don't have enough coordination signals to be considered clustered
+        low_degree_nodes = [
+            node for node, degree in self.graph.degree()
+            if degree < MIN_DEGREE
+        ]
+        self.graph.remove_nodes_from(low_degree_nodes)
+        logger.info(
+            "Removed %d wallets with fewer than %d connections",
+            len(low_degree_nodes),
+            MIN_DEGREE,
+        )
+
         logger.info(
             "Graph: %d nodes, %d edges after pruning",
             self.graph.number_of_nodes(),
@@ -170,7 +189,8 @@ class ClusterDetector:
             return []
 
         # Add behavioral similarity before community detection
-        self._add_behavioral_similarity()
+        # DISABLED: Too slow for large graphs (requires DB query per edge)
+        # self._add_behavioral_similarity()
 
         # Louvain community detection
         communities = nx.community.louvain_communities(
@@ -211,6 +231,14 @@ class ClusterDetector:
             same_side_ratio = same_side_total / total_edge_weight if total_edge_weight > 0 else 0
             confidence = round(min((edge_density * 0.5 + same_side_ratio * 0.5) * 100, 100), 2)
 
+            # Skip low-confidence clusters (likely coincidental co-trading, not coordination)
+            if confidence < MIN_CLUSTER_CONFIDENCE:
+                logger.debug(
+                    "Skipping cluster with %d wallets (confidence %.1f%% < %.1f%%)",
+                    len(wallets), confidence, MIN_CLUSTER_CONFIDENCE
+                )
+                continue
+
             cluster = {
                 "cluster_id": cluster_id,
                 "wallet_count": len(wallets),
@@ -230,6 +258,10 @@ class ClusterDetector:
     def save_clusters(self, clusters: list[dict]) -> None:
         """Save clusters to DB and update wallet_scores with cluster_id."""
         with self.db.get_connection() as conn:
+            # Clear existing cluster data
+            conn.execute("DELETE FROM clusters")
+            conn.execute("UPDATE wallet_scores SET cluster_id = NULL")
+
             for cluster in clusters:
                 conn.execute(
                     """INSERT OR REPLACE INTO clusters

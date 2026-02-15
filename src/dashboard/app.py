@@ -43,6 +43,27 @@ def query_df_safe(sql: str, params: tuple = (), default_value=None) -> pd.DataFr
         return default_value
 
 
+def format_wallet_with_links(wallet_address: str) -> str:
+    """Format wallet address with truncation and external links.
+
+    Returns HTML string with:
+    - Truncated address (0xABCD...1234)
+    - Polymarket profile icon/link
+    - Polygonscan explorer icon/link
+    """
+    if not wallet_address or len(wallet_address) < 12:
+        return wallet_address
+
+    short = f"{wallet_address[:6]}...{wallet_address[-4:]}"
+    polymarket_url = f"https://polymarket.com/profile/{wallet_address}"
+    polygonscan_url = f"https://polygonscan.com/address/{wallet_address}"
+
+    # Using small, subtle icons with spacing (single line to avoid newline artifacts)
+    html = f'<div style="display: flex; align-items: center; gap: 8px; white-space: nowrap;"><span style="font-family: monospace;">{short}</span><a href="{polymarket_url}" target="_blank" title="View on Polymarket" style="text-decoration: none; font-size: 16px;">🔗</a><a href="{polygonscan_url}" target="_blank" title="View on Polygonscan" style="text-decoration: none; font-size: 16px;">🔍</a></div>'
+
+    return html
+
+
 # ─── Sidebar ───
 st.sidebar.title("🔍 Insider Detector")
 page = st.sidebar.radio(
@@ -75,37 +96,63 @@ if page == "Dashboard":
 
     st.divider()
 
-    # Leaderboard
+    # Leaderboard with pagination
     st.subheader("Top Suspicious Wallets")
-    top_n = st.slider("Show top N", 10, 100, 30)
+
+    # Pagination controls
+    col_a, col_b, col_c = st.columns([2, 2, 1])
+    with col_a:
+        per_page = st.selectbox("Wallets per page", [25, 50, 100, 200], index=1)
+    with col_b:
+        # Get total count for pagination
+        total_count = query_df("SELECT COUNT(*) as count FROM wallet_scores")["count"][0]
+        total_pages = (total_count + per_page - 1) // per_page  # Ceiling division
+        page_num = st.number_input(
+            f"Page (1-{total_pages})",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1
+        )
+    with col_c:
+        st.metric("Total", f"{total_count:,}")
+
+    offset = (page_num - 1) * per_page
     df = query_df(
         """SELECT wallet_address, insider_score, total_trades, win_rate,
                   p_value, size_win_correlation, total_pnl, cluster_id
            FROM wallet_scores
            ORDER BY insider_score DESC
-           LIMIT ?""",
-        (top_n,),
+           LIMIT ? OFFSET ?""",
+        (per_page, offset),
     )
 
+    # Show current range
+    start_idx = offset + 1
+    end_idx = min(offset + per_page, total_count)
+    st.caption(f"Showing wallets {start_idx:,} - {end_idx:,} of {total_count:,}")
+
     if not df.empty:
-        df["wallet_short"] = df["wallet_address"].apply(
+        # Create plain text version for chart and HTML version for table
+        df["wallet_plain"] = df["wallet_address"].apply(
             lambda w: f"{w[:6]}...{w[-4:]}" if len(w) > 12 else w
         )
+        df["wallet_short"] = df["wallet_address"].apply(format_wallet_with_links)
         df["win_rate_pct"] = df["win_rate"] * 100
         df["pnl_fmt"] = df["total_pnl"].apply(lambda x: f"${x:,.0f}")
 
-        # Score distribution chart
+        # Score distribution chart (using plain text)
         fig = px.bar(
             df,
-            x="wallet_short",
+            x="wallet_plain",
             y="insider_score",
             color="insider_score",
             color_continuous_scale="RdYlGn_r",
             title="Insider Scores",
-            labels={"wallet_short": "Wallet", "insider_score": "Score"},
+            labels={"wallet_plain": "Wallet", "insider_score": "Score"},
         )
         fig.update_layout(xaxis_tickangle=-45, height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # Table
         display_df = df[
@@ -131,7 +178,35 @@ if page == "Dashboard":
                 "cluster_id": "Cluster",
             }
         )
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        # Render as HTML to support clickable links
+        st.markdown("""
+        <style>
+        .wallet-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        .wallet-table th {
+            background-color: #262730;
+            color: #fafafa;
+            padding: 12px 8px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #444;
+        }
+        .wallet-table td {
+            padding: 10px 8px;
+            border-bottom: 1px solid #eee;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown(
+            display_df.to_html(escape=False, index=False, classes="wallet-table"),
+            unsafe_allow_html=True
+        )
 
     # Score distribution histogram
     st.subheader("Score Distribution")
@@ -146,25 +221,55 @@ if page == "Dashboard":
         )
         fig.add_vline(x=25, line_dash="dash", line_color="orange", annotation_text="Medium")
         fig.add_vline(x=50, line_dash="dash", line_color="red", annotation_text="High")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 # ─── Wallet Deep-Dive ───
 elif page == "Wallet Deep-Dive":
     st.title("Wallet Deep-Dive")
 
-    # Wallet selector
+    # Wallet search/selector
+    st.subheader("Select Wallet")
+
+    # Text input for direct wallet address search
+    wallet_input = st.text_input(
+        "Enter wallet address (paste full address)",
+        placeholder="0x1234567890abcdef...",
+        help="Paste the full wallet address here to search directly"
+    )
+
+    # Dropdown selector for top wallets (scores 25+)
+    st.markdown("**Or select from suspicious wallets (score ≥ 25):**")
     top_wallets = query_df(
         """SELECT wallet_address, insider_score
-           FROM wallet_scores ORDER BY insider_score DESC LIMIT 100"""
+           FROM wallet_scores
+           WHERE insider_score >= 25
+           ORDER BY insider_score DESC"""
     )
-    options = [
-        f"{r['wallet_address'][:10]}... (score: {r['insider_score']:.1f})"
-        for _, r in top_wallets.iterrows()
-    ]
 
-    selected_idx = st.selectbox("Select a wallet", range(len(options)), format_func=lambda i: options[i])
-    if selected_idx is not None and not top_wallets.empty:
-        wallet = top_wallets.iloc[selected_idx]["wallet_address"]
+    if not top_wallets.empty:
+        # Show full addresses in dropdown with score
+        wallet_options = [""] + [
+            f"{r['wallet_address']} (score: {r['insider_score']:.1f})"
+            for _, r in top_wallets.iterrows()
+        ]
+        selected_option = st.selectbox(
+            f"{len(top_wallets)} wallets with insider score ≥ 25",
+            wallet_options,
+            label_visibility="collapsed"
+        )
+
+        # Determine which wallet to use
+        wallet = None
+        if wallet_input and wallet_input.strip():
+            # Use text input if provided
+            wallet = wallet_input.strip()
+        elif selected_option and selected_option != "":
+            # Extract address from dropdown selection (before the first space)
+            wallet = selected_option.split(" ")[0]
+    else:
+        wallet = wallet_input.strip() if wallet_input else None
+
+    if wallet:
 
         # Wallet stats
         score_row = query_df(
@@ -232,7 +337,7 @@ elif page == "Wallet Deep-Dive":
                 y="cumulative_pnl",
                 title="Cumulative PnL Over Time",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # Win/loss by market
             col1, col2 = st.columns(2)
@@ -244,7 +349,7 @@ elif page == "Wallet Deep-Dive":
                     title="Win/Loss Ratio",
                     color_discrete_sequence=["#2ecc71", "#e74c3c"],
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
             with col2:
                 fig = px.histogram(
@@ -256,7 +361,7 @@ elif page == "Wallet Deep-Dive":
                     barmode="overlay",
                     opacity=0.7,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
             # Trade table
             display_trades = trades[
@@ -270,7 +375,7 @@ elif page == "Wallet Deep-Dive":
                 "size": "Size ($)",
                 "is_winner": "Won",
             })
-            st.dataframe(display_trades, use_container_width=True, hide_index=True)
+            st.dataframe(display_trades, width='stretch', hide_index=True)
 
 # ─── Clusters ───
 elif page == "Clusters":
@@ -306,21 +411,47 @@ elif page == "Clusters":
                     wallets = pd.DataFrame()
 
                 if not wallets.empty:
-                    wallets["wallet_short"] = wallets["wallet_address"].apply(
-                        lambda w: f"{w[:6]}...{w[-4:]}"
-                    )
-                    st.dataframe(
-                        wallets[
-                            ["wallet_short", "insider_score", "total_trades", "win_rate", "total_pnl"]
-                        ].rename(columns={
-                            "wallet_short": "Wallet",
-                            "insider_score": "Score",
-                            "total_trades": "Trades",
-                            "win_rate": "Win Rate",
-                            "total_pnl": "PnL",
-                        }),
-                        use_container_width=True,
-                        hide_index=True,
+                    wallets["wallet_short"] = wallets["wallet_address"].apply(format_wallet_with_links)
+                    wallets["win_rate_pct"] = wallets["win_rate"] * 100
+                    wallets["pnl_fmt"] = wallets["total_pnl"].apply(lambda x: f"${x:,.0f}")
+
+                    display_wallets = wallets[
+                        ["wallet_short", "insider_score", "total_trades", "win_rate_pct", "pnl_fmt"]
+                    ].rename(columns={
+                        "wallet_short": "Wallet",
+                        "insider_score": "Score",
+                        "total_trades": "Trades",
+                        "win_rate_pct": "Win %",
+                        "pnl_fmt": "PnL",
+                    })
+
+                    # CSS styling for wallet table
+                    st.markdown("""
+                    <style>
+                    .wallet-table {
+                        width: 100%;
+                        border-collapse: collapse;
+                        margin: 20px 0;
+                        font-size: 14px;
+                    }
+                    .wallet-table th {
+                        background-color: #262730;
+                        color: #fafafa;
+                        padding: 12px 8px;
+                        text-align: left;
+                        font-weight: 600;
+                        border-bottom: 2px solid #444;
+                    }
+                    .wallet-table td {
+                        padding: 10px 8px;
+                        border-bottom: 1px solid #eee;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+
+                    st.markdown(
+                        display_wallets.to_html(escape=False, index=False, classes="wallet-table"),
+                        unsafe_allow_html=True
                     )
                 else:
                     st.info("No scored wallets in this cluster.")
@@ -358,7 +489,7 @@ elif page == "Markets":
                 "outcome": "Outcome",
                 "category": "Category",
             }),
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
         )
 
@@ -401,7 +532,7 @@ elif page == "Markets":
                     title="Trades Over Time",
                     labels={"trade_date": "Date", "price": "Price", "size": "Size ($)"},
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # Top wallets in this market
                 top = (
@@ -411,18 +542,18 @@ elif page == "Markets":
                     .head(10)
                     .reset_index()
                 )
-                top["wallet_short"] = top["wallet_address"].apply(
-                    lambda w: f"{w[:6]}...{w[-4:]}"
-                )
+                top["wallet_short"] = top["wallet_address"].apply(format_wallet_with_links)
                 st.subheader("Top Wallets in This Market")
-                st.dataframe(
-                    top[["wallet_short", "trades", "total_size"]].rename(
-                        columns={
-                            "wallet_short": "Wallet",
-                            "trades": "Trades",
-                            "total_size": "Total Size ($)",
-                        }
-                    ),
-                    use_container_width=True,
-                    hide_index=True,
+
+                display_top = top[["wallet_short", "trades", "total_size"]].rename(
+                    columns={
+                        "wallet_short": "Wallet",
+                        "trades": "Trades",
+                        "total_size": "Total Size ($)",
+                    }
+                )
+
+                st.markdown(
+                    display_top.to_html(escape=False, index=False, classes="wallet-table"),
+                    unsafe_allow_html=True
                 )
