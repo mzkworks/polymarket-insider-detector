@@ -19,12 +19,10 @@ st.set_page_config(
 
 @st.cache_resource
 def get_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    # Disabled WAL mode due to potential corruption issues
-    # conn.execute("PRAGMA journal_mode=WAL")
-    # Force DELETE mode explicitly
-    conn.execute("PRAGMA journal_mode=DELETE")
+    # Don't change journal mode - just use whatever the database already has
+    # Changing journal mode requires exclusive lock which can cause "database is locked" errors
     return conn
 
 
@@ -63,6 +61,50 @@ def format_wallet_with_links(wallet_address: str) -> str:
 
     return html
 
+
+def check_password() -> bool:
+    """Returns True if user entered correct password."""
+    # Set your password here
+    CORRECT_PASSWORD = "polymarket2025"
+
+    def password_entered():
+        if st.session_state["password"] == CORRECT_PASSWORD:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    # First run - no password entered yet
+    if "password_correct" not in st.session_state:
+        st.title("🔍 Polymarket Insider Detector")
+        st.markdown("### Access Required")
+        st.text_input(
+            "Enter password to continue",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        return False
+    # Password was incorrect
+    elif not st.session_state["password_correct"]:
+        st.title("🔍 Polymarket Insider Detector")
+        st.markdown("### Access Required")
+        st.text_input(
+            "Enter password to continue",
+            type="password",
+            on_change=password_entered,
+            key="password",
+        )
+        st.error("❌ Incorrect password")
+        return False
+    # Password correct
+    else:
+        return True
+
+
+# ─── PASSWORD PROTECTION ───
+if not check_password():
+    st.stop()
 
 # ─── Sidebar ───
 st.sidebar.title("🔍 Insider Detector")

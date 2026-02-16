@@ -12,7 +12,10 @@
       "Bash(python -m json.tool:*)",
       "Bash(cmd.exe /c \"ipconfig /all | findstr /C:\"\"DNS Servers\"\"\")",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(git commit:*)",
+      "Bash(git add:*)",
+      "Bash(git push:*)"
     ]
   }
 }
